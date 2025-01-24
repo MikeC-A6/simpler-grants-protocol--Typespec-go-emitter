@@ -22,7 +22,8 @@
   "author": "",
   "license": "CC0-1.0",
   "dependencies": {
-    "@typespec/compiler": "^0.63.0"
+    "@typespec/compiler": "^0.63.0",
+    "@typespec/http": "^0.63.0"
   },
   "devDependencies": {
     "@types/jest": "^29.5.11",
