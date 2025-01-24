@@ -1,5 +1,6 @@
-import { Program, Type, Model, getTypeName } from "@typespec/compiler";
+import { Program, Type, Model, getTypeName, navigateProgram } from "@typespec/compiler";
 import { getGoType } from "./go-types.js";
+import { join } from "path";
 
 export interface EmitterOptions {
   packageName?: string;
@@ -7,11 +8,11 @@ export interface EmitterOptions {
 }
 
 export class GoEmitter {
-  private program: Program;
-  private options: EmitterOptions;
+  private program: Program | Record<string, Type>;
+  private options: Required<EmitterOptions>;
   private imports: Set<string>;
 
-  constructor(program: Program, options: EmitterOptions = {}) {
+  constructor(program: Program | Record<string, Type>, options: EmitterOptions = {}) {
     this.program = program;
     this.options = {
       packageName: options.packageName || "api",
@@ -27,7 +28,7 @@ export class GoEmitter {
 
     // Generate struct fields
     for (const [propName, prop] of model.properties) {
-      const goType = getGoType(this.program, prop.type);
+      const goType = getGoType(this.program as Program, prop.type);
       if (goType.imports) {
         goType.imports.forEach((imp) => this.imports.add(imp));
       }
@@ -55,11 +56,36 @@ export class GoEmitter {
     return header;
   }
 
-  // This will be expanded as we add more features
   async emit(): Promise<Map<string, string>> {
     const files = new Map<string, string>();
-    // We'll implement the actual emission logic here
-    // For now, it's just a placeholder
+    const models = new Set<Model>();
+
+    // Collect all models from the program
+    navigateProgram(this.program as Program, {
+      model: (model) => {
+        // Skip built-in models and those from other libraries
+        if (!model.name.startsWith("TypeSpec.") && !model.name.includes("@typespec")) {
+          models.add(model);
+        }
+      },
+    });
+
+    if (models.size > 0) {
+      let modelsContent = "";
+      
+      // Generate code for each model
+      for (const model of models) {
+        modelsContent += this.generateModelCode(model);
+      }
+
+      // Create the complete file content with header
+      const fullContent = this.generateFileHeader() + modelsContent;
+      
+      // Store the generated file
+      const outputPath = join(this.options.outputDir, "models.go");
+      files.set(outputPath, fullContent);
+    }
+
     return files;
   }
 } 
