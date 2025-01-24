@@ -1,29 +1,8 @@
-import { createTestHost, createTestWrapper, TestHost } from "@typespec/compiler/testing";
-import { GoEmitter } from "../src/emitter.js";
+import { createTestHost, TestHost } from "@typespec/compiler/testing";
 
-export interface TestHostOptions {
-  outputDir?: string;
-  packageName?: string;
-}
-
-export async function createGoTestHost(typespecCode: string, options: TestHostOptions = {}) {
+export async function createGoTestHost(code: string): Promise<TestHost> {
   const host = await createTestHost();
-  const mainFile = {
-    path: "/main.tsp",
-    content: typespecCode,
-  };
-  host.addTypeSpecFile(mainFile.path, mainFile.content);
-  
-  const program = await host.compile("/main.tsp");
-  const emitter = new GoEmitter(program, {
-    outputDir: options.outputDir || "generated",
-    packageName: options.packageName || "api",
-  });
-
-  const files = await emitter.emit();
-  return {
-    program,
-    files,
-    host,
-  };
+  await host.addTypeSpecFile("main.tsp", code);
+  await host.compile("main.tsp");
+  return host;
 } 

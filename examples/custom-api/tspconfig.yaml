@@ -1,3 +1,7 @@
 emit:
-  - "@typespec/json-schema"
-  - "@typespec/openapi3"
+  - "@common-grants/typespec-go"
+
+options:
+  "@common-grants/typespec-go":
+    package-name: "customapi"
+    output-dir: "generated"

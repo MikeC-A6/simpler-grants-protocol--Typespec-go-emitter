@@ -1,11 +1,16 @@
 import "@common-grants/core";
-import "@typespec/json-schema";
 
 using JsonSchema;
 using CommonGrants;
 
 @jsonSchema
 namespace CustomAPI.CustomModels;
+
+enum OpportunityStatus {
+    Draft,
+    Published,
+    Closed,
+}
 
 model OpportunityNumber extends Models.CustomField {
     name: "Funding Opportunity Number";
@@ -21,4 +26,7 @@ model CustomOpportunity extends Models.Opportunity {
     customFields: {
         fundingOpportunityNumber: OpportunityNumber;
     };
+    
+    /** The status of the opportunity */
+    status: OpportunityStatus;
 }

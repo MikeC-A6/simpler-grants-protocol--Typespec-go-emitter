@@ -1,6 +1,3 @@
-import "@typespec/http";
-import "@typespec/rest";
-
 import "@common-grants/core";
 
 import "./models.tsp";

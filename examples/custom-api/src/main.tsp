@@ -1,4 +1,4 @@
-import "@typespec/http";
+import "@common-grants/core";
 
 import "./routes.tsp";
 

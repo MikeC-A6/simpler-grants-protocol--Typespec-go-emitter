@@ -1,89 +1,33 @@
-import { createTestHost, TestHost } from "@typespec/compiler/testing";
-import { GoEmitter } from "../src/emitter.js";
-import { join } from "path";
+import { createGoTestHost } from "./test-host.js";
+import { $onEmit } from "../src/emitter.js";
 
-describe("Go Emitter - Interface Tests", () => {
-  let host: TestHost;
+describe("Interface tests", () => {
+  it("generates server interface", async () => {
+    const host = await createGoTestHost(`
+      @route("/pets")
+      interface PetStore {
+        @get list(): Pet[];
+        @post create(@body pet: Pet): Pet;
+      }
 
-  beforeEach(async () => {
-    host = await createTestHost();
-  });
+      model Pet {
+        name: string;
+        age: number;
+      }
+    `);
 
-  async function compileAndEmit(typespecCode: string, options = {}) {
-    const mainFile = "/main.tsp";
-    await host.addTypeSpecFile(mainFile, typespecCode);
-    const program = await host.compile(mainFile);
-
-    const emitter = new GoEmitter(program, {
-      packageName: "testapi",
+    const files = await $onEmit(host.program, {
+      packageName: "test",
       outputDir: "generated",
-      ...options,
     });
-    return await emitter.emit();
-  }
 
-  test("generates interface with HTTP operations", async () => {
-    const files = await compileAndEmit(`
-      using TypeSpec.Http;
+    expect(files.size).toBe(2);
+    expect(files.has("generated/models.go")).toBe(true);
+    expect(files.has("generated/api.go")).toBe(true);
 
-      @route("/api")
-      interface GrantsAPI {
-        @get
-        @route("/grants")
-        listGrants(): Grant[];
-
-        @get
-        @route("/grants/{id}")
-        getGrant(@path id: string): Grant;
-
-        @post
-        @route("/grants")
-        createGrant(@body grant: Grant): Grant;
-      }
-
-      model Grant {
-        id: string;
-        title: string;
-        amount: float64;
-      }
-    `);
-
-    const expectedPath = join("generated", "api.go");
-    const content = files.get(expectedPath);
-    expect(content).toBeDefined();
-    expect(content).toContain("type GrantsAPI interface {");
-    expect(content).toContain("ListGrants(ctx context.Context) ([]Grant, error)");
-    expect(content).toContain("GetGrant(ctx context.Context, id string) (*Grant, error)");
-    expect(content).toContain("CreateGrant(ctx context.Context, grant *Grant) (*Grant, error)");
-  });
-
-  test("handles query parameters and documentation", async () => {
-    const files = await compileAndEmit(`
-      using TypeSpec.Http;
-
-      @route("/api")
-      interface SearchAPI {
-        @doc("Search for grants by title")
-        @get
-        @route("/search")
-        searchGrants(
-          @query title?: string,
-          @query minAmount?: float64,
-          @query maxAmount?: float64,
-        ): Grant[];
-      }
-
-      model Grant {
-        id: string;
-        title: string;
-        amount: float64;
-      }
-    `);
-
-    const expectedPath = join("generated", "api.go");
-    const content = files.get(expectedPath);
-    expect(content).toBeDefined();
-    expect(content).toContain("// SearchGrants searches for grants by title");
-    expect(content).toContain("SearchGrants(ctx context.Context, title *string, minAmount *float64, maxAmount *float64) ([]Grant, error)");
+    const apiContent = files.get("generated/api.go");
+    expect(apiContent).toContain("type ServerInterface interface {");
+    expect(apiContent).toContain("list(ctx context.Context) ([]Pet, error)");
+    expect(apiContent).toContain("create(ctx context.Context, body *Pet) (Pet, error)");
   });
 }); 

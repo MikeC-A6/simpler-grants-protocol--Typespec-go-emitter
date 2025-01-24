@@ -1,128 +1,245 @@
-import { Interface, Operation, Type, Program, navigateProgram } from "@typespec/compiler";
-import { HttpOperation, getHttpOperation } from "@typespec/http";
-
-export interface GoOperation {
-  name: string;
-  method: string;
-  path: string;
-  parameters: GoParameter[];
-  returnType: string;
-  documentation?: string;
-}
-
-export interface GoParameter {
-  name: string;
-  type: string;
-  isPointer: boolean;
-  isQuery: boolean;
-  isPath: boolean;
-  isBody: boolean;
-}
-
-export interface GoInterface {
-  name: string;
-  operations: GoOperation[];
-  documentation?: string;
-}
-
-export function collectInterfaces(program: Program): GoInterface[] {
-  const interfaces: GoInterface[] = [];
-
-  navigateProgram(program, {
-    interface: (iface) => {
-      // Skip built-in interfaces and those from the base library
-      if (iface.name.startsWith("TypeSpec.") || iface.name.includes("@typespec")) {
-        return;
-      }
-
-      const goInterface: GoInterface = {
-        name: iface.name,
-        operations: collectOperations(program, iface),
-        documentation: iface.node?.docs?.join("\n"),
-      };
-
-      interfaces.push(goInterface);
-    },
-  });
-
-  return interfaces;
-}
-
-function collectOperations(program: Program, iface: Interface): GoOperation[] {
-  const operations: GoOperation[] = [];
-
-  for (const member of iface.operations.values()) {
-    const httpOp = getHttpOperation(program, member);
-    if (!httpOp) continue;
-
-    const operation: GoOperation = {
-      name: member.name,
-      method: httpOp.method.toUpperCase(),
-      path: httpOp.path,
-      parameters: collectParameters(program, member, httpOp),
-      returnType: getReturnType(program, member),
-      documentation: member.node?.docs?.join("\n"),
+import {
+    Interface,
+    Operation,
+    Program,
+    getTypeName,
+    navigateProgram,
+  } from "@typespec/compiler";
+  import { getHttpOperation } from "@typespec/http";
+  import { getGoType } from "./go-types.js";
+  
+  export interface GoOperation {
+    name: string;
+    documentation?: string;
+    parameters: GoParameter[];
+    returnType?: string;
+    httpMethod?: string;
+    path?: string;
+  }
+  
+  export interface GoParameter {
+    name: string;
+    type: string;
+    isPointer?: boolean;
+    location?: "path" | "query" | "header" | "body";
+  }
+  
+  export interface GoInterface {
+    name: string;
+    documentation?: string;
+    operations: GoOperation[];
+  }
+  
+  function cleanTypeName(name: string): string {
+    return name
+      .split(".").pop()!
+      .replace(/\[\]/g, "")
+      .replace(/[<>{}]/g, "")
+      .replace(/\*+/g, "*")
+      .trim();
+  }
+  
+  /**
+   * Collect all user-defined interfaces in the TypeSpec program.
+   */
+  export function collectInterfaces(program: Program): GoInterface[] {
+    const interfaces: GoInterface[] = [];
+  
+    navigateProgram(program, {
+      interface: (iface) => {
+        const interfaceName = getTypeName(iface);
+        if (interfaceName.startsWith("TypeSpec.") || interfaceName.includes("@typespec")) {
+          return;
+        }
+  
+        interfaces.push(processInterface(program, iface));
+      },
+    });
+  
+    return interfaces;
+  }
+  
+  /**
+   * Convert a TypeSpec Interface to our GoInterface structure.
+   */
+  function processInterface(program: Program, iface: Interface): GoInterface {
+    return {
+      name: iface.name,
+      documentation: iface.node?.docs?.join("\n"),
+      operations: Array.from(iface.operations.values())
+        .map(op => processOperation(program, op))
+        .filter((op): op is GoOperation => op !== undefined),
     };
-
-    operations.push(operation);
   }
+  
+  /**
+   * Convert a TypeSpec Operation to a GoOperation,
+   * using @typespec/http to detect parameters and return types.
+   */
+  function processOperation(program: Program, operation: Operation): GoOperation | undefined {
+    const [httpOp] = getHttpOperation(program, operation);
+    if (!httpOp) {
+      return undefined;
+    }
+  
+    const goOperation: GoOperation = {
+      name: operation.name,
+      documentation: operation.node?.docs?.join("\n"),
+      parameters: [{
+        name: "ctx",
+        type: "context.Context",
+        isPointer: false,
+      }],
+      httpMethod: httpOp.verb.toUpperCase(),
+      path: httpOp.path,
+    };
+  
+    // Add path parameters
+    if (httpOp.parameters?.parameters) {
+      const pathParams = httpOp.parameters.parameters.filter(p => p.type === "path");
+      for (const param of pathParams) {
+        const goType = getGoType(program, param.param.type);
+        goOperation.parameters.push({
+          name: param.name,
+          type: cleanTypeName(goType.name),
+          isPointer: false,
+          location: "path",
+        });
+      }
+    }
+  
+    // Add query parameters
+    if (httpOp.parameters?.parameters) {
+      const queryParams = httpOp.parameters.parameters.filter(p => p.type === "query");
+      for (const param of queryParams) {
+        const goType = getGoType(program, param.param.type);
+        goOperation.parameters.push({
+          name: param.name,
+          type: cleanTypeName(goType.name),
+          isPointer: true,
+          location: "query",
+        });
+      }
+    }
+  
+    // Add body parameter
+    if (httpOp.parameters?.body) {
+      const goType = getGoType(program, httpOp.parameters.body.type);
+      goOperation.parameters.push({
+        name: "body",
+        type: cleanTypeName(goType.name),
+        isPointer: true,
+        location: "body",
+      });
+    }
+  
+    // Handle return type
+    if (operation.returnType) {
+      const goType = getGoType(program, operation.returnType);
+      const typeName = cleanTypeName(goType.name);
+      goOperation.returnType = operation.name.toLowerCase() === "list" ? 
+        `[]${typeName}` : 
+        goType.isPointer ? `*${typeName}` : typeName;
+    }
+  
+    return goOperation;
+  }
+  
+  export function generateInterfaces(program: Program): string {
+    const interfaces = collectInterfaces(program);
+    if (interfaces.length === 0) {
+      return "";
+    }
+  
+    let code = `// Code generated by @common-grants/typespec-go. DO NOT EDIT.
 
-  return operations;
+package api
+
+import (
+\t"context"
+\t"net/http"
+\t"github.com/oapi-codegen/runtime"
+)
+
+// ServerInterface represents all server handlers.
+type ServerInterface interface {
+`;
+  
+    // Generate interface methods
+    for (const iface of interfaces) {
+      for (const op of iface.operations) {
+        if (op.documentation) {
+          code += `\t// ${op.documentation}\n`;
+        }
+        
+        // Generate method signature
+        code += `\t${op.name}(`;
+        code += op.parameters
+          .map(p => `${p.name} ${p.isPointer ? "*" : ""}${p.type}`)
+          .join(", ");
+        code += `) (${op.returnType || "interface{}"}, error)\n`;
+      }
+    }
+  
+    code += "}\n\n";
+  
+    // Add strict server interface
+    code += `// StrictServerInterface represents all server handlers with strict type checking.
+type StrictServerInterface interface {
+`;
+  
+    for (const iface of interfaces) {
+      for (const op of iface.operations) {
+        if (op.documentation) {
+          code += `\t// ${op.documentation}\n`;
+        }
+        
+        // Generate request object
+        code += `type ${op.name}RequestObject struct {\n`;
+        for (const param of op.parameters) {
+          if (param.name === "ctx") continue;
+          code += `\t${param.name} ${param.isPointer ? "*" : ""}${param.type} \`json:"${param.name}${param.isPointer ? ",omitempty" : ""}"\`\n`;
+        }
+        code += `}\n\n`;
+  
+        // Generate response object
+        code += `type ${op.name}ResponseObject interface {\
+          Visit${op.name}Response(w http.ResponseWriter) error\n`;
+        code += `}\n\n`;
+  
+        // Generate strict method signature
+        code += `\t${op.name}(ctx context.Context, request ${op.name}RequestObject) (${op.name}ResponseObject, error)\n`;
+      }
+    }
+  
+    code += "}\n\n";
+  
+    // Add wrapper struct
+    code += `// ServerInterfaceWrapper converts contexts to parameters.
+type ServerInterfaceWrapper struct {
+\tHandler ServerInterface
+\tStrictHandler StrictServerInterface
+\tHandlerMiddlewares []MiddlewareFunc
+\tErrorHandlerFunc func(w http.ResponseWriter, r *http.Request, err error)
 }
 
-function collectParameters(program: Program, operation: Operation, httpOp: HttpOperation): GoParameter[] {
-  const parameters: GoParameter[] = [];
-
-  // Path parameters
-  for (const param of httpOp.parameters.path) {
-    parameters.push({
-      name: param.name,
-      type: getTypeString(param.type),
-      isPointer: false,
-      isQuery: false,
-      isPath: true,
-      isBody: false,
-    });
-  }
-
-  // Query parameters
-  for (const param of httpOp.parameters.query) {
-    parameters.push({
-      name: param.name,
-      type: getTypeString(param.type),
-      isPointer: param.optional,
-      isQuery: true,
-      isPath: false,
-      isBody: false,
-    });
-  }
-
-  // Body parameter
-  if (httpOp.parameters.body) {
-    parameters.push({
-      name: "body",
-      type: getTypeString(httpOp.parameters.body.type),
-      isPointer: false,
-      isQuery: false,
-      isPath: false,
-      isBody: true,
-    });
-  }
-
-  return parameters;
+// NewServerInterfaceWrapper creates a new wrapper with validation middleware.
+func NewServerInterfaceWrapper(si ServerInterface, strict StrictServerInterface) ServerInterfaceWrapper {
+\treturn ServerInterfaceWrapper{
+\t\tHandler: si,
+\t\tStrictHandler: strict,
+\t\tErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
+\t\t\thttp.Error(w, err.Error(), http.StatusBadRequest)
+\t\t},
+\t}
 }
 
-function getReturnType(program: Program, operation: Operation): string {
-  if (!operation.returnType) return "interface{}";
-  return getTypeString(operation.returnType);
+// Use allows adding middleware to the router.
+func (w *ServerInterfaceWrapper) Use(middleware func(http.HandlerFunc) http.HandlerFunc) {
+\tw.HandlerMiddlewares = append(w.HandlerMiddlewares, middleware)
 }
-
-function getTypeString(type: Type): string {
-  if (type.kind === "Model") {
-    return type.name;
-  } else if (type.kind === "Scalar") {
-    return type.name;
-  } else {
-    return "interface{}";
+`;
+  
+    return code;
   }
-} 
+  

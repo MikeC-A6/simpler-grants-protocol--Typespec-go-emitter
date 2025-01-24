@@ -1,156 +1,334 @@
-import { Program, Type, Model, getTypeName, navigateProgram } from "@typespec/compiler";
-import { getGoType } from "./go-types.js";
-import { collectInterfaces, GoInterface, GoOperation } from "./interfaces.js";
-import { join } from "path";
-
-export interface EmitterOptions {
-  packageName?: string;
-  outputDir?: string;
-}
-
-export class GoEmitter {
-  private program: Program | Record<string, Type>;
-  private options: Required<EmitterOptions>;
-  private imports: Set<string>;
-
-  constructor(program: Program | Record<string, Type>, options: EmitterOptions = {}) {
-    this.program = program;
-    this.options = {
-      packageName: options.packageName || "api",
-      outputDir: options.outputDir || "generated",
-    };
-    this.imports = new Set<string>();
+import {
+    Program,
+    Model,
+    Type,
+    getTypeName,
+    navigateProgram,
+  } from "@typespec/compiler";
+  import { getHttpOperation } from "@typespec/http";
+  import { join } from "path";
+  
+  export interface EmitterOptions {
+    packageName?: string;
+    outputDir?: string;
   }
-
-  generateModelCode(model: Model): string {
-    const modelName = getTypeName(model);
-    let code = `// ${modelName} represents a generated model\n`;
-    code += `type ${modelName} struct {\n`;
-
-    // Generate struct fields
-    for (const [propName, prop] of model.properties) {
-      const goType = getGoType(this.program as Program, prop.type);
-      if (goType.imports) {
-        goType.imports.forEach((imp) => this.imports.add(imp));
+  
+  function cleanTypeName(name: string): string {
+    return name
+      .split(".").pop()!
+      .replace(/[^a-zA-Z0-9]/g, "")
+      .trim();
+  }
+  
+  function capitalize(str: string): string {
+    return str.charAt(0).toUpperCase() + str.slice(1);
+  }
+  
+  function shouldSkipModel(modelName: string): boolean {
+    return (
+      modelName.startsWith("TypeSpec.") ||
+      modelName.includes("@typespec") ||
+      modelName === "object" ||
+      modelName === "string" ||
+      modelName === "unknown" ||
+      modelName === "Record"
+    );
+  }
+  
+  function getGoType(type: Type): string {
+    if (!type) return "interface{}";
+  
+    // Handle array types
+    const arrayType = type as { kind?: string; elementType?: Type };
+    if (arrayType.kind === "Array" && arrayType.elementType) {
+      const elemType = getGoType(arrayType.elementType);
+      return `[]${elemType}`;
+    }
+  
+    // Handle model types
+    if (type.kind === "Model") {
+      // Handle response objects with body
+      const model = type as { properties?: Map<string, { type: Type }> };
+      if (model.properties?.has("body")) {
+        const bodyType = model.properties.get("body")!.type;
+        return getGoType(bodyType);
       }
-
-      const fieldType = goType.isPointer ? `*${goType.name}` : goType.name;
-      code += `\t${propName} ${fieldType} \`json:"${propName}${prop.optional ? ",omitempty" : ""}"\`\n`;
+      return cleanTypeName(getTypeName(type));
     }
-
-    code += "}\n\n";
-    return code;
+  
+    // Handle enum types
+    if (type.kind === "Enum") {
+      return cleanTypeName(getTypeName(type));
+    }
+  
+    // Handle scalar types
+    if (type.kind === "Scalar") {
+      const baseType = (type as any).baseScalar;
+      if (baseType) {
+        return getGoType(baseType);
+      }
+    }
+  
+    // Handle primitive types
+    switch (type.kind) {
+      case "String": {
+        const format = (type as any).format;
+        if (format === "uuid") {
+          return "types.UUID";
+        } else if (format === "date-time") {
+          return "time.Time";
+        }
+        return "string";
+      }
+      case "Number":
+        return "float64";
+      case "Boolean":
+        return "bool";
+      case "Intrinsic": {
+        const name = getTypeName(type);
+        switch (name) {
+          case "TypeSpec.uuid":
+            return "types.UUID";
+          case "TypeSpec.url":
+          case "TypeSpec.plainTime":
+            return "string";
+          default:
+            return "interface{}";
+        }
+      }
+      default:
+        return "interface{}";
+    }
   }
-
-  generateInterfaceCode(iface: GoInterface): string {
-    let code = "";
-    
-    // Add documentation if available
-    if (iface.documentation) {
-      code += `// ${iface.documentation}\n`;
+  
+  function getReturnType(type: Type): string {
+    if (!type) return "interface{}";
+  
+    // Handle array types
+    const arrayType = type as { kind?: string; elementType?: Type };
+    if (arrayType.kind === "Array" && arrayType.elementType) {
+      const elemType = getGoType(arrayType.elementType);
+      return `[]${elemType}`;
     }
-    
-    code += `type ${iface.name} interface {\n`;
-    
-    // Generate methods for each operation
-    for (const op of iface.operations) {
-      code += this.generateOperationSignature(op);
+  
+    // Handle model types
+    if (type.kind === "Model") {
+      // Handle response objects with body
+      const model = type as { properties?: Map<string, { type: Type }> };
+      if (model.properties?.has("body")) {
+        const bodyType = model.properties.get("body")!.type;
+        return getReturnType(bodyType);
+      }
+      return cleanTypeName(getTypeName(type));
     }
-    
-    code += "}\n\n";
-    return code;
+  
+    // Handle enum types
+    if (type.kind === "Enum") {
+      return cleanTypeName(getTypeName(type));
+    }
+  
+    // Handle scalar types
+    if (type.kind === "Scalar") {
+      const baseType = (type as any).baseScalar;
+      if (baseType) {
+        return getReturnType(baseType);
+      }
+    }
+  
+    // Handle primitive types
+    switch (type.kind) {
+      case "String": {
+        const format = (type as any).format;
+        if (format === "uuid") {
+          return "types.UUID";
+        } else if (format === "date-time") {
+          return "time.Time";
+        }
+        return "string";
+      }
+      case "Number":
+        return "float64";
+      case "Boolean":
+        return "bool";
+      case "Intrinsic": {
+        const name = getTypeName(type);
+        switch (name) {
+          case "TypeSpec.uuid":
+            return "types.UUID";
+          case "TypeSpec.url":
+          case "TypeSpec.plainTime":
+            return "string";
+          default:
+            return "interface{}";
+        }
+      }
+      default:
+        return "interface{}";
+    }
   }
-
-  generateOperationSignature(op: GoOperation): string {
-    let code = "";
-    
-    // Add documentation if available
-    if (op.documentation) {
-      code += `\t// ${op.documentation}\n`;
-    }
-    
-    // Start method signature
-    code += `\t${op.name}(ctx context.Context`;
-    
-    // Add parameters
-    for (const param of op.parameters) {
-      const paramType = param.isPointer ? `*${param.type}` : param.type;
-      code += `, ${param.name} ${paramType}`;
-    }
-    
-    // Add return types
-    code += `) (${op.returnType}, error)\n`;
-    
-    return code;
-  }
-
-  generateFileHeader(): string {
-    // Add context to imports
-    this.imports.add("context");
-
-    let header = `// Code generated by @common-grants/typespec-go. DO NOT EDIT.\n\n`;
-    header += `package ${this.options.packageName}\n\n`;
-
-    if (this.imports.size > 0) {
-      header += "import (\n";
-      this.imports.forEach((imp) => {
-        header += `\t"${imp}"\n`;
-      });
-      header += ")\n\n";
-    }
-
-    return header;
-  }
-
-  async emit(): Promise<Map<string, string>> {
+  
+  export async function $onEmit(program: Program, options: EmitterOptions = {}): Promise<Map<string, string>> {
     const files = new Map<string, string>();
-    const models = new Set<Model>();
+    const packageName = options.packageName || "api";
+    const outputDir = options.outputDir || "generated";
+  
+    // Generate models.go
+    const modelsContent = generateModels(program, packageName);
+    files.set(join(outputDir, "models.go"), modelsContent);
+  
+    // Generate api.go
+    const apiContent = generateAPI(program, packageName);
+    files.set(join(outputDir, "api.go"), apiContent);
+  
+    return files;
+  }
+  
+  export function generateModels(program: Program, packageName: string): string {
+    let code = `// Code generated by typespec-go. DO NOT EDIT.
 
-    // Collect all models from the program
-    navigateProgram(this.program as Program, {
+package ${packageName}
+
+import (
+    "encoding/json"
+    "time"
+    "github.com/oapi-codegen/runtime"
+    "github.com/oapi-codegen/runtime/types"
+)
+
+`;
+  
+    // Track processed models to avoid duplicates
+    const processedModels = new Set<string>();
+    const models = new Set<Model>();
+    const enums = new Set<Type>();
+  
+    navigateProgram(program, {
       model: (model) => {
-        // Skip built-in models and those from other libraries
-        if (!model.name.startsWith("TypeSpec.") && !model.name.includes("@typespec")) {
+        const modelName = getTypeName(model);
+        if (!shouldSkipModel(modelName)) {
           models.add(model);
         }
       },
+      enum: (enumType) => {
+        const enumName = getTypeName(enumType);
+        if (!shouldSkipModel(enumName)) {
+          enums.add(enumType);
+        }
+      }
     });
+  
+    // Generate enums first
+    for (const enumType of enums) {
+      const enumName = cleanTypeName(getTypeName(enumType));
+      code += `// ${enumName} represents a generated enum
+type ${enumName} string
 
-    // Generate models.go
-    if (models.size > 0) {
-      let modelsContent = "";
+const (
+`;
       
-      // Generate code for each model
-      for (const model of models) {
-        modelsContent += this.generateModelCode(model);
+      // Generate enum values
+      for (const [memberName, member] of (enumType as any).members) {
+        code += `    ${enumName}${capitalize(memberName)} ${enumName} = "${memberName}"\n`;
       }
-
-      // Create the complete file content with header
-      const fullContent = this.generateFileHeader() + modelsContent;
-      
-      // Store the generated file
-      const outputPath = join(this.options.outputDir, "models.go");
-      files.set(outputPath, fullContent);
+  
+      code += ")\n\n";
     }
-
-    // Generate api.go for interfaces
-    const interfaces = collectInterfaces(this.program as Program);
-    if (interfaces.length > 0) {
-      let apiContent = "";
+  
+    // Generate models
+    for (const model of models) {
+      const modelName = cleanTypeName(getTypeName(model));
       
-      // Generate code for each interface
-      for (const iface of interfaces) {
-        apiContent += this.generateInterfaceCode(iface);
+      // Skip if we've already processed this model
+      if (processedModels.has(modelName)) {
+        continue;
       }
-
-      // Create the complete file content with header
-      const fullContent = this.generateFileHeader() + apiContent;
-      
-      // Store the generated file
-      const outputPath = join(this.options.outputDir, "api.go");
-      files.set(outputPath, fullContent);
+      processedModels.add(modelName);
+  
+      code += `// ${modelName} represents a generated model
+type ${modelName} struct {
+`;
+  
+      // Embed base model if it exists
+      if (model.baseModel) {
+        const baseModelName = cleanTypeName(getTypeName(model.baseModel));
+        code += `    ${baseModelName}\n`;
+      }
+  
+      // Generate fields
+      for (const [fieldName, field] of model.properties) {
+        // Skip if field exists in base model
+        if (model.baseModel && model.baseModel.properties.has(fieldName)) {
+          continue;
+        }
+  
+        const fieldType = getGoType(field.type);
+        const isPointer = field.optional && !fieldType.startsWith("[");
+  
+        code += `    ${capitalize(fieldName)} ${isPointer ? "*" : ""}${fieldType} \`json:"${fieldName}${field.optional ? ",omitempty" : ""}"\`\n`;
+      }
+  
+      code += "}\n\n";
     }
-
-    return files;
+  
+    return code;
   }
-} 
+  
+  export function generateAPI(program: Program, packageName: string): string {
+    let code = `// Code generated by typespec-go. DO NOT EDIT.
+
+package ${packageName}
+
+import (
+    "context"
+    "net/http"
+)
+
+// ServerInterface represents all server handlers.
+type ServerInterface interface {
+`;
+  
+    // Track used operation names to avoid duplicates
+    const usedNames = new Set<string>();
+  
+    // Collect operations from interfaces
+    navigateProgram(program, {
+      operation: (op) => {
+        const [httpOp] = getHttpOperation(program, op);
+        if (!httpOp) return;
+  
+        // Generate a unique operation name
+        let opName = capitalize(op.name);
+        if (usedNames.has(opName)) {
+          const pathParts = httpOp.path.split("/").filter(p => p && !p.startsWith("{"));
+          const pathSuffix = pathParts.map(capitalize).join("");
+          opName = `${opName}${pathSuffix}`;
+        }
+        usedNames.add(opName);
+  
+        // Get return type
+        const returnType = op.returnType ? getReturnType(op.returnType) : "interface{}";
+  
+        code += `    // ${opName} handles ${httpOp.verb.toUpperCase()} ${httpOp.path}
+    ${opName}(ctx context.Context`;
+  
+        // Add parameters
+        if (httpOp.parameters?.parameters) {
+          for (const param of httpOp.parameters.parameters) {
+            const paramType = getGoType(param.param.type);
+            code += `, ${param.name} ${param.type === "query" ? "*" : ""}${paramType}`;
+          }
+        }
+  
+        // Add body parameter if it exists
+        if (httpOp.parameters?.body) {
+          const bodyType = getGoType(httpOp.parameters.body.type);
+          code += `, body *${bodyType}`;
+        }
+  
+        code += `) (${returnType}, error)\n`;
+      },
+    });
+  
+    code += "}\n";
+    return code;
+  }
